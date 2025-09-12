@@ -63,6 +63,8 @@ Available options when re-running:
 
 ## Manual Deployment Guide
 
+### Use hooknsock.sh or follow below.
+
 ## Architecture
 
 1. **FastAPI server** runs on your VPS/cloud (1 vCPU, 1 GB RAM is plenty).
@@ -171,49 +173,6 @@ sudo ufw allow 443/tcp
 sudo ufw allow 80/tcp
 sudo ufw allow 8000/tcp  # If exposing FastAPI directly
 sudo ufw enable
-```
-
----
-
-## Modern Alternatives to systemd
-
-While **systemd** is still the gold standard for Linux service management (auto-restart, logging, timed jobs), newer tools exist:
-
-- **Caddy**: Web server/reverse proxy that auto-manages SSL and can run apps as services.
-- **Supervisor**: Simpler process manager for non-systemd systems.
-- **pm2**: Popular in Node.js world, but not for Python.
-
-For most Python apps on Linux, **systemd remains best for reliability and automation**.
-
----
-
-## Example FastAPI Skeleton
-
-```python
-from fastapi import FastAPI, WebSocket, Request, Header
-import asyncio
-
-app = FastAPI()
-message_queue = asyncio.Queue()
-VALID_TOKEN = "your-super-secret-token"  # Use env vars in production!
-
-@app.post("/webhook")
-async def webhook(request: Request, x_auth_token: str = Header(None)):
-    if x_auth_token != VALID_TOKEN:
-        return {"error": "Unauthorized"}
-    data = await request.json()
-    await message_queue.put(data)
-    return {"status": "queued"}
-
-@app.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket, token: str = None):
-    await websocket.accept()
-    if token != VALID_TOKEN:
-        await websocket.close(code=1008)
-        return
-    while True:
-        data = await message_queue.get()
-        await websocket.send_json(data)
 ```
 
 ---
