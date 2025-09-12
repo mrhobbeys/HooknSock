@@ -65,7 +65,7 @@ sudo apt upgrade -y
 
 # Install required packages
 log_info "Installing required packages..."
-sudo apt install -y python3 python3-pip python3-venv nginx certbot python3-certbot-nginx ufw unattended-upgrades
+sudo apt install -y python3 python3-pip python3-venv nginx certbot python3-certbot-nginx ufw unattended-upgrades fail2ban
 
 # Install websockets for Python (if not in requirements)
 # Note: This will be handled by requirements.txt
@@ -101,16 +101,54 @@ source venv/bin/activate
 log_info "Installing Python dependencies..."
 pip install -r requirements.txt
 
+# Function to redact token for logging
+redact_token() {
+    local token="$1"
+    if [ ${#token} -gt 3 ]; then
+        echo "${token:0:1}***${token: -1}"
+    else
+        echo "***"
+    fi
+}
+
 # Generate random webhook token
 WEBHOOK_TOKEN=$(openssl rand -hex 32)
-log_info "Generated webhook token: $WEBHOOK_TOKEN"
+REDACTED_TOKEN=$(redact_token "$WEBHOOK_TOKEN")
+log_info "Generated webhook token: $REDACTED_TOKEN"
 
-# Create .env file
+# Ask about multi-service setup
+read -p "Do you want to set up multiple services/channels? (y/N): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    log_info "Multi-service setup selected"
+    read -p "Enter service name for primary token (e.g., 'webhook', 'service1'): " SERVICE_NAME
+    SERVICE_NAME=${SERVICE_NAME:-webhook}
+    
+    read -p "Enter allowed domain for webhooks (e.g., 'example.com' or '*' for any): " WEBHOOK_DOMAIN
+    WEBHOOK_DOMAIN=${WEBHOOK_DOMAIN:-"*"}
+    
+    if [[ "$WEBHOOK_DOMAIN" == "*" ]]; then
+        log_warning "WARNING: Using wildcard (*) allows webhooks from ANY domain - this may be insecure!"
+    fi
+    
+    WEBHOOK_TOKENS="$WEBHOOK_TOKEN:$SERVICE_NAME:$WEBHOOK_DOMAIN"
+else
+    log_info "Single service setup (backward compatible)"
+    WEBHOOK_TOKENS="$WEBHOOK_TOKEN:default:*"
+    log_warning "Using wildcard domain (*) for single service setup"
+fi
+
+# Create .env file with new format
 cat > .env << EOF
-WEBHOOK_TOKEN=$WEBHOOK_TOKEN
+WEBHOOK_TOKENS=$WEBHOOK_TOKENS
+DISABLE_SYSTEM_INFO=true
+SITE_TITLE=HooknSock - Webhook Relay
+RATE_LIMIT_REQUESTS=100
+RATE_LIMIT_WINDOW=60
+MAX_PAYLOAD_SIZE=1048576
 EOF
 
-log_info "Created .env file with webhook token"
+log_info "Created .env file with webhook configuration"
 
 # Ask for domain/IP
 read -p "Do you have a domain name for SSL? (y/N): " -n 1 -r
@@ -224,6 +262,23 @@ else
     sudo ufw allow 8000/tcp
 fi
 
+# Configure firewall and SSH security
+log_info "Configuring firewall and SSH security..."
+sudo ufw --force enable
+sudo ufw allow ssh  # Ensure SSH access is not blocked
+
+# Check SSH password authentication
+log_info "Checking SSH configuration..."
+if grep -q "^PasswordAuthentication yes" /etc/ssh/sshd_config; then
+    log_warning "SSH password authentication is enabled. For security, consider switching to key-based authentication."
+    log_warning "To disable passwords: sudo sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config && sudo systemctl restart ssh"
+fi
+
+# Configure fail2ban
+log_info "Configuring fail2ban for SSH protection..."
+sudo systemctl enable fail2ban
+sudo systemctl start fail2ban
+
 # Configure unattended upgrades
 log_info "Configuring automatic security updates..."
 sudo tee /etc/apt/apt.conf.d/50unattended-upgrades > /dev/null << EOF
@@ -273,7 +328,9 @@ echo "========================================"
 echo "Setup Summary:"
 echo "========================================"
 echo "Application Directory: $APP_DIR"
-echo "Webhook Token: $WEBHOOK_TOKEN"
+echo "Webhook Token: $REDACTED_TOKEN"
+echo "Service Setup: $(echo $WEBHOOK_TOKENS | cut -d':' -f2)"
+echo "Domain Restriction: $(echo $WEBHOOK_TOKENS | cut -d':' -f3)"
 if [[ "$USE_SSL" == "true" ]]; then
     echo "Domain: $DOMAIN"
     echo "Webhook URL: https://$DOMAIN/webhook"
@@ -296,9 +353,24 @@ echo
 log_warning "IMPORTANT: Save the webhook token securely!"
 log_warning "Update your webhook sender to use the token in the x-auth-token header"
 if [[ "$USE_SSL" == "true" ]]; then
-    log_warning "Update your WebSocket client to include ?token=$WEBHOOK_TOKEN in the URL"
+    log_warning "Update your WebSocket client to include ?token=$REDACTED_TOKEN in the URL"
+    if [[ $WEBHOOK_TOKENS == *":"* ]]; then
+        SERVICE=$(echo $WEBHOOK_TOKENS | cut -d':' -f2)
+        log_info "Channel-specific WebSocket: wss://$DOMAIN/ws/$SERVICE?token=YOUR_TOKEN"
+        log_info "Legacy WebSocket (auto-route): wss://$DOMAIN/ws?token=YOUR_TOKEN"
+    fi
 else
-    log_warning "Update your WebSocket client to include ?token=$WEBHOOK_TOKEN in the URL"
+    log_warning "Update your WebSocket client to include ?token=$REDACTED_TOKEN in the URL"
+    if [[ $WEBHOOK_TOKENS == *":"* ]]; then
+        SERVICE=$(echo $WEBHOOK_TOKENS | cut -d':' -f2)
+        if [[ "$USE_NGINX" == "true" ]]; then
+            log_info "Channel-specific WebSocket: ws://$SERVER_IP/ws/$SERVICE?token=YOUR_TOKEN"
+            log_info "Legacy WebSocket (auto-route): ws://$SERVER_IP/ws?token=YOUR_TOKEN"
+        else
+            log_info "Channel-specific WebSocket: ws://$SERVER_IP:8000/ws/$SERVICE?token=YOUR_TOKEN"
+            log_info "Legacy WebSocket (auto-route): ws://$SERVER_IP:8000/ws?token=YOUR_TOKEN"
+        fi
+    fi
 fi
 echo
 log_info "Setup complete! Your webhook-to-websocket relay is ready to use."
