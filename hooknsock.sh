@@ -41,7 +41,7 @@ log_header() {
 # Configuration variables
 SCRIPT_VERSION="1.0.0"
 PROJECT_NAME="HooknSock"
-PROJECT_REPO="https://github.com/yourusername/hooknsock.git"  # Update this with actual repo
+PROJECT_REPO="https://github.com/mrhobbeys/HooknSock.git"
 DEFAULT_APP_DIR="/home/$USER/hooknsock"
 
 # Check if running as root
