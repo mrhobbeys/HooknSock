@@ -1,0 +1,13 @@
+[Unit]
+Description=HooknSock - Webhook-to-WebSocket relay
+After=network.target
+
+[Service]
+User=webhookrelay
+WorkingDirectory=/home/webhookrelay/app
+Environment="PATH=/home/webhookrelay/venv/bin"
+ExecStart=/home/webhookrelay/venv/bin/uvicorn server:app --host 0.0.0.0 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
