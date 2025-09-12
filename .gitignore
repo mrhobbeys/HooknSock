@@ -117,3 +117,6 @@ dmypy.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Local development files - DO NOT COMMIT
+local_only.md
