@@ -1,5 +1,8 @@
-pytest==7.4.3
-pytest-asyncio==0.21.1
-httpx==0.25.2
-black==23.12.1
-flake8==6.1.0
+﻿
+black==25.9.0
+flake8==7.3.0
+httpx==0.28.1
+pytest==8.4.2
+pytest-asyncio==1.2.0
+
+
