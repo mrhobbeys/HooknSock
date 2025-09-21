@@ -122,7 +122,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             )
     elif not args.quiet:
         for token, channel, domain in disclosures:
-            print(f"generated token for channel '{channel}' (domain '{domain}'): {redact(token)}")
+            print(
+                f"generated token for channel '{channel}' (domain '{domain}'): {redact(token)}"
+            )
         print("use --show to display full values or write them to a secrets manager")
 
     return 0
