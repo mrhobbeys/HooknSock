@@ -104,43 +104,91 @@ pip install -r requirements.txt
 # Function to redact token for logging
 redact_token() {
     local token="$1"
-    if [ ${#token} -gt 3 ]; then
-        echo "${token:0:1}***${token: -1}"
+    if [ ${#token} -gt 6 ]; then
+        echo "${token:0:3}***${token: -3}"
     else
         echo "***"
     fi
 }
 
-# Generate random webhook token
-WEBHOOK_TOKEN=$(openssl rand -hex 32)
-REDACTED_TOKEN=$(redact_token "$WEBHOOK_TOKEN")
-log_info "Generated webhook token: $REDACTED_TOKEN"
+# Prepare secure secret storage
+SECRETS_DIR="/etc/hooknsock"
+TOKEN_ENV="$SECRETS_DIR/webhook.env"
+sudo mkdir -p "$SECRETS_DIR"
+sudo chown root:root "$SECRETS_DIR"
+sudo chmod 750 "$SECRETS_DIR"
 
-# Ask about multi-service setup
-read -p "Do you want to set up multiple services/channels? (y/N): " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    log_info "Multi-service setup selected"
-    read -p "Enter service name for primary token (e.g., 'webhook', 'service1'): " SERVICE_NAME
-    SERVICE_NAME=${SERVICE_NAME:-webhook}
-    
-    read -p "Enter allowed domain for webhooks (e.g., 'example.com' or '*' for any): " WEBHOOK_DOMAIN
-    WEBHOOK_DOMAIN=${WEBHOOK_DOMAIN:-"*"}
-    
-    if [[ "$WEBHOOK_DOMAIN" == "*" ]]; then
-        log_warning "WARNING: Using wildcard (*) allows webhooks from ANY domain - this may be insecure!"
+generate_tokens_via_helper() {
+    local channels_input
+    read -p "Enter comma-separated channel names (default: default): " channels_input
+    channels_input=${channels_input:-default}
+
+    IFS=',' read -ra CHANNEL_ARRAY <<< "$channels_input"
+    declare -a SERVICE_ARGS=()
+    for raw_channel in "${CHANNEL_ARRAY[@]}"; do
+        local channel="$(echo "$raw_channel" | xargs)"
+        if [[ -z "$channel" ]]; then
+            continue
+        fi
+        local domain
+        read -p "Restrict domain for channel '$channel' (default: *): " domain
+        domain=${domain:-*}
+        if [[ "$domain" == "*" ]]; then
+            log_warning "Channel '$channel' accepts webhooks from ANY domain. Consider narrowing this in production."
+        fi
+        SERVICE_ARGS+=("--service" "${channel}:${domain}")
+    done
+
+    if [[ ${#SERVICE_ARGS[@]} -eq 0 ]]; then
+        log_error "No valid channel names provided; aborting token generation."
+        exit 1
     fi
-    
-    WEBHOOK_TOKENS="$WEBHOOK_TOKEN:$SERVICE_NAME:$WEBHOOK_DOMAIN"
+
+    log_info "Generating tokens with scripts/generate_tokens.py (values shown once)..."
+    sudo python3 scripts/generate_tokens.py "${SERVICE_ARGS[@]}" --env-file "$TOKEN_ENV" --show
+    WEBHOOK_TOKENS=$(sudo awk -F'=' '/^WEBHOOK_TOKENS=/{print $2}' "$TOKEN_ENV")
+}
+
+if [[ -f "$TOKEN_ENV" ]]; then
+    log_warning "Existing token file found at $TOKEN_ENV."
+    read -p "Regenerate tokens? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        generate_tokens_via_helper
+    else
+        WEBHOOK_TOKENS=$(sudo awk -F'=' '/^WEBHOOK_TOKENS=/{print $2}' "$TOKEN_ENV")
+    fi
 else
-    log_info "Single service setup (backward compatible)"
-    WEBHOOK_TOKENS="$WEBHOOK_TOKEN:default:*"
-    log_warning "Using wildcard domain (*) for single service setup"
+    read -p "Generate new deployment tokens now? (Y/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+        read -p "Paste existing WEBHOOK_TOKENS value (token:channel:domain,...): " MANUAL_TOKENS
+        if [[ -z "$MANUAL_TOKENS" ]]; then
+            log_error "WEBHOOK_TOKENS cannot be empty."
+            exit 1
+        fi
+        printf "WEBHOOK_TOKENS=%s\n" "$MANUAL_TOKENS" | sudo tee "$TOKEN_ENV" > /dev/null
+        sudo chmod 600 "$TOKEN_ENV"
+        WEBHOOK_TOKENS="$MANUAL_TOKENS"
+    else
+        generate_tokens_via_helper
+    fi
 fi
 
-# Create .env file with new format
+if [[ -z "$WEBHOOK_TOKENS" ]]; then
+    log_error "WEBHOOK_TOKENS could not be established."
+    exit 1
+fi
+
+PRIMARY_TOKEN=$(echo "$WEBHOOK_TOKENS" | cut -d',' -f1 | cut -d':' -f1)
+REDACTED_TOKEN=$(redact_token "$PRIMARY_TOKEN")
+log_info "Primary webhook token generated: $REDACTED_TOKEN"
+
+CHANNEL_SUMMARY=$(echo "$WEBHOOK_TOKENS" | tr ',' '\n' | awk -F':' '{print $2}' | tr '\n' ',' | sed 's/,$//')
+DOMAIN_SUMMARY=$(echo "$WEBHOOK_TOKENS" | tr ',' '\n' | awk -F':' '{print $3}' | tr '\n' ',' | sed 's/,$//')
+
 cat > .env << EOF
-WEBHOOK_TOKENS=$WEBHOOK_TOKENS
+# Local developer overrides (deployment secrets live in $TOKEN_ENV)
 DISABLE_SYSTEM_INFO=true
 SITE_TITLE=HooknSock - Webhook Relay
 RATE_LIMIT_REQUESTS=100
@@ -148,8 +196,8 @@ RATE_LIMIT_WINDOW=60
 MAX_PAYLOAD_SIZE=1048576
 EOF
 
-log_info "Created .env file with webhook configuration"
-
+chmod 600 .env
+log_info "Created .env template (tokens remain in $TOKEN_ENV)"
 # Ask for domain/IP
 read -p "Do you have a domain name for SSL? (y/N): " -n 1 -r
 echo
@@ -189,9 +237,18 @@ After=network.target
 [Service]
 User=$USER
 WorkingDirectory=$APP_DIR
+EnvironmentFile=$TOKEN_ENV
 Environment="PATH=$APP_DIR/venv/bin"
 ExecStart=$EXEC_START
 Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=$APP_DIR
+RuntimeDirectory=hooknsock
+RuntimeDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target
@@ -328,9 +385,9 @@ echo "========================================"
 echo "Setup Summary:"
 echo "========================================"
 echo "Application Directory: $APP_DIR"
-echo "Webhook Token: $REDACTED_TOKEN"
-echo "Service Setup: $(echo $WEBHOOK_TOKENS | cut -d':' -f2)"
-echo "Domain Restriction: $(echo $WEBHOOK_TOKENS | cut -d':' -f3)"
+echo "Token store: $TOKEN_ENV (root:root 600)"
+echo "Channels: ${CHANNEL_SUMMARY:-unknown}"
+echo "Domains: ${DOMAIN_SUMMARY:-*}"
 if [[ "$USE_SSL" == "true" ]]; then
     echo "Domain: $DOMAIN"
     echo "Webhook URL: https://$DOMAIN/webhook"
@@ -350,17 +407,17 @@ echo "Service Status: sudo systemctl status webhookrelay"
 echo "Logs: sudo journalctl -u webhookrelay -f"
 echo "========================================"
 echo
-log_warning "IMPORTANT: Save the webhook token securely!"
+log_warning "IMPORTANT: Store the full tokens displayed above securely; the service reads them from $TOKEN_ENV"
 log_warning "Update your webhook sender to use the token in the x-auth-token header"
 if [[ "$USE_SSL" == "true" ]]; then
-    log_warning "Update your WebSocket client to include ?token=$REDACTED_TOKEN in the URL"
+    log_warning "Update your WebSocket client to include ?token=<your_generated_token> in the URL"
     if [[ $WEBHOOK_TOKENS == *":"* ]]; then
         SERVICE=$(echo $WEBHOOK_TOKENS | cut -d':' -f2)
         log_info "Channel-specific WebSocket: wss://$DOMAIN/ws/$SERVICE?token=YOUR_TOKEN"
         log_info "Legacy WebSocket (auto-route): wss://$DOMAIN/ws?token=YOUR_TOKEN"
     fi
 else
-    log_warning "Update your WebSocket client to include ?token=$REDACTED_TOKEN in the URL"
+    log_warning "Update your WebSocket client to include ?token=<your_generated_token> in the URL"
     if [[ $WEBHOOK_TOKENS == *":"* ]]; then
         SERVICE=$(echo $WEBHOOK_TOKENS | cut -d':' -f2)
         if [[ "$USE_NGINX" == "true" ]]; then

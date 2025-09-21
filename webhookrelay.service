@@ -5,9 +5,19 @@ After=network.target
 [Service]
 User=webhookrelay
 WorkingDirectory=/home/webhookrelay/app
+EnvironmentFile=/etc/hooknsock/webhook.env
 Environment="PATH=/home/webhookrelay/venv/bin"
 ExecStart=/home/webhookrelay/venv/bin/uvicorn server:app --host 0.0.0.0 --port 8000
 Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/home/webhookrelay/app
+RuntimeDirectory=hooknsock
+RuntimeDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target
+

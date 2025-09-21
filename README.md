@@ -134,6 +134,18 @@ WEBHOOK_TOKENS=your-secret-token
 WEBHOOK_TOKENS=token1,token2,token3
 ```
 
+### Generate Tokens Securely
+
+Use the helper CLI to mint high-entropy tokens during provisioning (the install script invokes it automatically, but you can rerun it for rotations):
+
+```bash
+python scripts/generate_tokens.py --service service1 --service payments:example.com --env-file /etc/hooknsock/webhook.env --show
+```
+
+- Secrets are written to `/etc/hooknsock/webhook.env` with `chmod 600`; track only placeholders in git.
+- Copy the plaintext tokens once, store them in a password manager, then update your webhook providers.
+- For local development, point `--env-file` at `.env` to refresh tokens without touching production secrets.
+
 ### Security Options
 
 ```bash
@@ -357,9 +369,9 @@ SITE_TITLE=Webhook Relay Service
 
 - Use strong, randomly generated tokens (32+ characters)
 - Use different tokens for each service
-- Rotate tokens regularly
-- Never commit tokens to version control
-- Store tokens in environment variables or secure configuration management
+- Rotate tokens regularly and restart the service after updating `/etc/hooknsock/webhook.env`
+- Generate secrets with `python scripts/generate_tokens.py` so they land in `/etc/hooknsock/webhook.env` with `chmod 600`
+- Never commit production tokens; store plaintext in a password manager or dedicated secret store
 
 ### Network Security
 
