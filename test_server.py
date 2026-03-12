@@ -90,6 +90,30 @@ def test_cors_headers():
     assert "access-control-allow-origin" in response.headers
 
 
+def test_security_headers():
+    """Test that security headers are present on responses"""
+    response = client.get("/")
+    assert response.headers.get("x-content-type-options") == "nosniff"
+    assert response.headers.get("x-frame-options") == "DENY"
+    assert response.headers.get("x-xss-protection") == "1; mode=block"
+    assert response.headers.get("referrer-policy") == "strict-origin-when-cross-origin"
+    assert response.headers.get("content-security-policy") == "default-src 'self'"
+
+
+def test_homepage_title_escaped():
+    """Test that homepage title is HTML-escaped to prevent XSS"""
+    from unittest.mock import patch
+
+    malicious_title = "<script>alert('xss')</script>"
+    with patch("server.SITE_TITLE", malicious_title):
+        response = client.get("/")
+        assert response.status_code == 200
+        # Raw script tag must not appear in the output
+        assert "<script>" not in response.text
+        # The HTML-escaped form must be present instead
+        assert "&lt;script&gt;" in response.text
+
+
 def test_websocket_auth_failure():
     """Test that invalid tokens are rejected for WebSocket connections"""
     # This test is simplified to avoid hanging - just test the auth logic indirectly

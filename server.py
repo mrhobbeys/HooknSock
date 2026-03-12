@@ -1,9 +1,10 @@
+import html
 import os
 import asyncio
 import time
 import logging
 from collections import defaultdict
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 from fastapi import FastAPI, WebSocket, Request, Header, status, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,7 +27,13 @@ def redact_token(token: str) -> str:
 
 
 # Load configuration from environment variables
-WEBHOOK_TOKENS = os.environ.get("WEBHOOK_TOKENS", "your-super-secret-token")
+WEBHOOK_TOKENS = os.environ.get("WEBHOOK_TOKENS", "")
+if not WEBHOOK_TOKENS:
+    logger.critical(
+        "WEBHOOK_TOKENS environment variable is not set. "
+        "All webhook and WebSocket requests will be rejected. "
+        "Set WEBHOOK_TOKENS in your .env file or environment."
+    )
 SITE_TITLE = os.environ.get("SITE_TITLE", "HooknSock - Webhook to WebSocket Relay")
 DISABLE_SYSTEM_INFO = os.environ.get("DISABLE_SYSTEM_INFO", "false").lower() == "true"
 
@@ -90,8 +97,8 @@ for config in TOKEN_CONFIG.values():
 # If any token allows *, use wildcard (but warn in logs)
 if "*" in allowed_origins:
     cors_origins = ["*"]
-    print(
-        "⚠️  WARNING: CORS configured for ALL origins (*) - this may be insecure for production!"
+    logger.warning(
+        "CORS configured for ALL origins (*) - " "this may be insecure for production!"
     )
 else:
     cors_origins = list(allowed_origins)
@@ -125,6 +132,7 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = "default-src 'self'"
 
     # Only add HSTS if we're using HTTPS
     if request.url.scheme == "https":
@@ -138,21 +146,23 @@ async def add_security_headers(request: Request, call_next):
 @app.post("/webhook")
 async def webhook(request: Request, x_auth_token: str = Header(None)):
     client_ip = request.client.host if request.client else "unknown"
-    user_agent = request.headers.get("user-agent", "unknown")
 
     # Check authentication
     if x_auth_token not in TOKEN_CONFIG:
         logger.warning(
-            f"Unauthorized webhook attempt from {client_ip} with token: {redact_token(x_auth_token or 'none')}"
+            f"Unauthorized webhook attempt from {client_ip} "
+            f"with token: {redact_token(x_auth_token or 'none')}"
         )
         return JSONResponse(
-            content={"error": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED
+            content={"error": "Unauthorized"},
+            status_code=status.HTTP_401_UNAUTHORIZED,
         )
 
     # Check rate limiting
     if not check_rate_limit(x_auth_token):
         logger.warning(
-            f"Rate limit exceeded for token {redact_token(x_auth_token)} from {client_ip}"
+            f"Rate limit exceeded for token "
+            f"{redact_token(x_auth_token)} from {client_ip}"
         )
         return JSONResponse(
             content={"error": "Rate limit exceeded"},
@@ -172,12 +182,14 @@ async def webhook(request: Request, x_auth_token: str = Header(None)):
     try:
         data = await request.json()
         logger.info(
-            f"Webhook received from {client_ip} for channel '{channel}' (token: {redact_token(x_auth_token)})"
+            f"Webhook received from {client_ip} for channel '{channel}' "
+            f"(token: {redact_token(x_auth_token)})"
         )
-    except Exception as e:
-        logger.warning(f"Invalid JSON from {client_ip}: {str(e)}")
+    except Exception:
+        logger.warning(f"Invalid JSON from {client_ip}")
         return JSONResponse(
-            content={"error": "Invalid JSON"}, status_code=status.HTTP_400_BAD_REQUEST
+            content={"error": "Invalid JSON"},
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
 
     await message_queues[channel].put(data)
@@ -204,7 +216,8 @@ async def ws_channel_endpoint(
         )
         if has_domain_restrictions:
             logger.warning(
-                f"WebSocket origin validation failed from {client_ip} (origin: {origin})"
+                f"WebSocket origin validation failed from "
+                f"{client_ip} (origin: {origin})"
             )
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
@@ -214,19 +227,22 @@ async def ws_channel_endpoint(
     # Verify token is valid and matches the channel
     if token not in TOKEN_CONFIG or TOKEN_CONFIG[token]["channel"] != channel:
         logger.warning(
-            f"WebSocket auth failed from {client_ip} for channel '{channel}' (token: {redact_token(token or 'none')})"
+            f"WebSocket auth failed from {client_ip} for channel "
+            f"'{channel}' (token: {redact_token(token or 'none')})"
         )
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
     logger.info(
-        f"WebSocket connected from {client_ip} to channel '{channel}' (token: {redact_token(token)})"
+        f"WebSocket connected from {client_ip} to channel "
+        f"'{channel}' (token: {redact_token(token)})"
     )
 
     # Ensure the channel queue exists
     if channel not in message_queues:
         logger.error(
-            f"Channel '{channel}' does not exist for WebSocket connection from {client_ip}"
+            f"Channel '{channel}' does not exist for WebSocket "
+            f"connection from {client_ip}"
         )
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -235,7 +251,7 @@ async def ws_channel_endpoint(
         while True:
             data = await message_queues[channel].get()
             await websocket.send_json(data)
-    except Exception as e:
+    except Exception:
         logger.info(f"WebSocket disconnected from {client_ip} for channel '{channel}'")
         await websocket.close()
 
@@ -259,7 +275,8 @@ async def ws_endpoint(websocket: WebSocket, token: Optional[str] = None):
         )
         if has_domain_restrictions:
             logger.warning(
-                f"WebSocket origin validation failed from {client_ip} (origin: {origin})"
+                f"WebSocket origin validation failed from "
+                f"{client_ip} (origin: {origin})"
             )
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
@@ -268,7 +285,8 @@ async def ws_endpoint(websocket: WebSocket, token: Optional[str] = None):
 
     if token not in TOKEN_CONFIG:
         logger.warning(
-            f"WebSocket auth failed from {client_ip} (token: {redact_token(token or 'none')})"
+            f"WebSocket auth failed from {client_ip} "
+            f"(token: {redact_token(token or 'none')})"
         )
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -276,16 +294,18 @@ async def ws_endpoint(websocket: WebSocket, token: Optional[str] = None):
     # Route to the token's assigned channel
     channel = TOKEN_CONFIG[token]["channel"]
     logger.info(
-        f"WebSocket connected from {client_ip} to channel '{channel}' (legacy endpoint, token: {redact_token(token)})"
+        f"WebSocket connected from {client_ip} to channel '{channel}' "
+        f"(legacy endpoint, token: {redact_token(token)})"
     )
 
     try:
         while True:
             data = await message_queues[channel].get()
             await websocket.send_json(data)
-    except Exception as e:
+    except Exception:
         logger.info(
-            f"WebSocket disconnected from {client_ip} for channel '{channel}' (legacy endpoint)"
+            f"WebSocket disconnected from {client_ip} for channel "
+            f"'{channel}' (legacy endpoint)"
         )
         await websocket.close()
 
@@ -293,8 +313,6 @@ async def ws_endpoint(websocket: WebSocket, token: Optional[str] = None):
 @app.get("/health")
 async def health():
     if DISABLE_SYSTEM_INFO:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=404, detail="Not found")
     return {
         "status": "ok",
@@ -307,21 +325,28 @@ async def health():
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
+    title = html.escape(SITE_TITLE)
     html_content = f"""
 <!DOCTYPE html>
 <html>
 <head>
-    <title>{SITE_TITLE}</title>
+    <title>{title}</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body {{ font-family: monospace; max-width: 600px; margin: 100px auto; padding: 20px; text-align: center; }}
+        body {{
+            font-family: monospace;
+            max-width: 600px;
+            margin: 100px auto;
+            padding: 20px;
+            text-align: center;
+        }}
         .status {{ color: #22c55e; font-size: 18px; }}
         h1 {{ margin-bottom: 30px; }}
     </style>
 </head>
 <body>
-    <h1>{SITE_TITLE}</h1>
+    <h1>{title}</h1>
     <p class="status">● Server Status: Online</p>
 </body>
 </html>
